@@ -67,16 +67,19 @@ for stock_id, df in stock_df.items():
         }
     )
 
-    # 新增圖片檔名欄位
-    df['image_path'] = None
+    # 預先建立圖片路徑清單
+    image_paths = []
+
+    # 設定圖表樣式
+    fig, ax = plt.subplots(figsize=(10, 6))
 
     # 對每一天生成圖片
-    for i in tqdm(range(center_position, len(df) - center_position)):
+    for i in tqdm(range(center_position, len(df) - center_position), mininterval=1):
         # 取得滑動視窗的資料
-        window_data = df.iloc[i - center_position : i + center_position + 1].copy()
+        window_data = df.iloc[i - center_position : i + center_position + 1]
 
-        # 設定圖表樣式
-        fig, ax = plt.subplots(figsize=(10, 6))
+        # 清空圖表並繪製新圖表
+        ax.clear()
         mpf.plot(window_data, type='candle', style='charles', volume=False, ax=ax)
 
         # 移除座標軸和標籤
@@ -88,13 +91,15 @@ for stock_id, df in stock_df.items():
 
         # 儲存圖片
         plt.savefig(filepath, bbox_inches='tight', pad_inches=0, dpi=100)
-        plt.close(fig)  # 關閉圖表資源
-
-        # 更新 DataFrame 的圖片路徑
-        df.loc[df.index[i], 'image_path'] = filepath
+        image_paths.append(filepath)
 
         # 強制垃圾回收
         gc.collect()
+
+    plt.close(fig)  # 關閉圖表資源
+
+    # 更新圖片路徑到 DataFrame
+    df.loc[df.index[center_position : len(df) - center_position], 'image_path'] = image_paths
 
     # 新增技術指標
     df = add_technical_indicators(df)
