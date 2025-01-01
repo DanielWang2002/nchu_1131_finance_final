@@ -2,3 +2,4 @@ k_line
 __pycache__
 *.pyc
 *.pth
+config.py

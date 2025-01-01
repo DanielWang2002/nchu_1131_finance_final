@@ -6,6 +6,7 @@ import pickle
 import talib
 from tqdm import tqdm
 from FinMind.data import DataLoader
+from concurrent.futures import ProcessPoolExecutor
 import gc
 
 # 股票代號列表
@@ -17,19 +18,35 @@ api = DataLoader()
 # 下載股票數據
 stock_df = {}
 for stock in stock_list:
-    stock_df[stock] = api.taiwan_stock_daily(stock_id=stock, start_date="2020-01-01")
+    df = api.taiwan_stock_daily(stock_id=stock, start_date="2023-01-01")
+
+    # 轉為適用 mplfinance 的欄位格式
+    df['date'] = pd.to_datetime(df['date'])
+    df.set_index('date', inplace=True)
+    df.rename(
+        columns={
+            'open': 'Open',
+            'max': 'High',
+            'min': 'Low',
+            'close': 'Close',
+            'Trading_Volume': 'Volume',
+        },
+        inplace=True,
+    )
+    stock_df[stock] = df
 
 # 建立儲存圖片的資料夾
 if not os.path.exists('./k_line'):
     os.makedirs('./k_line')
 
-# 設定參數
-window_size = 11  # K棒總數
-center_position = window_size // 2  # 中心位置
+# look_back = 10，代表「前 10 天」的 K 棒
+look_back = 10
 
 
 def add_technical_indicators(df):
-    """增加技術指標到 DataFrame"""
+    """
+    對 df 計算一些常用技術指標。
+    """
     df['MA_5'] = df['Close'].rolling(window=5).mean()
     df['MA_10'] = df['Close'].rolling(window=10).mean()
     df['MA_20'] = df['Close'].rolling(window=20).mean()
@@ -52,66 +69,65 @@ def add_technical_indicators(df):
     return df
 
 
-# 處理每個股票
-for stock_id, df in stock_df.items():
-    # 資料預處理
-    df = df.copy()
-    df.index = pd.to_datetime(df.index)
-    df = df.rename(
-        columns={
-            'open': 'Open',
-            'max': 'High',
-            'min': 'Low',
-            'close': 'Close',
-            'Trading_Volume': 'Volume',
-        }
-    )
+def process_stock(args):
+    stock_id, df = args
+    df = df.copy()  # 不要直接改到原始
+    df = add_technical_indicators(df)  # 先加技術指標，也可以放後面
 
-    # 預先建立圖片路徑清單
     image_paths = []
 
-    # 設定圖表樣式
+    # 設定繪圖區
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # 對每一天生成圖片
-    for i in tqdm(range(center_position, len(df) - center_position), mininterval=1):
-        # 取得滑動視窗的資料
-        window_data = df.iloc[i - center_position : i + center_position + 1]
+    # 用 look_back (10) 來控制迴圈
+    # i 表示 "當天 (要預測的那天)"，
+    # 圖片只畫 "前 10 天" => df.iloc[i - 10 : i]
+    for i in tqdm(range(look_back, len(df)), desc=f"Processing {stock_id}"):
+        # === 改動處 ===
+        # 原本: window_data = df.iloc[i - look_back : i + 1]
+        # 現在: 只拿到 i - 10 ~ i-1，共 10 根 K 棒，不含當天
+        window_data = df.iloc[i - look_back : i]
 
-        # 清空圖表並繪製新圖表
         ax.clear()
         mpf.plot(window_data, type='candle', style='charles', volume=False, ax=ax)
-
-        # 移除座標軸和標籤
         ax.axis('off')
 
-        # 設定檔名
         filename = f"{stock_id}_{i}.png"
         filepath = f"./k_line/{filename}"
-
-        # 儲存圖片
         plt.savefig(filepath, bbox_inches='tight', pad_inches=0, dpi=100)
         image_paths.append(filepath)
 
-        # 強制垃圾回收
         gc.collect()
 
-    plt.close(fig)  # 關閉圖表資源
+    plt.close(fig)
 
-    # 更新圖片路徑到 DataFrame
-    df.loc[df.index[center_position : len(df) - center_position], 'image_path'] = image_paths
+    # 現在 i 從 look_back 到 len(df)-1
+    # 因此 image_paths 長度為 len(df) - look_back
+    # 要把這些路徑，對應到 df.index[i] (第 i 天)
+    image_path_series = pd.Series(
+        data=image_paths, index=df.index[look_back:]  # 與 image_paths 個數相同
+    )
 
-    # 新增技術指標
-    df = add_technical_indicators(df)
+    # 將這個欄位放回 df，代表「第 i 天所對應的圖路徑」畫的是 (i-10 ~ i-1)
+    df.loc[image_path_series.index, 'image_path'] = image_path_series
 
-    # 更新原始 DataFrame
-    stock_df[stock_id] = df
-
-    # 再次進行垃圾回收
     gc.collect()
+    return stock_id, df
 
-print(stock_df['1773'].head())
 
-# 保存 DataFrame
+with ProcessPoolExecutor() as executor:
+    results = list(executor.map(process_stock, stock_df.items()))
+
+for stock_id, processed_df in results:
+    stock_df[stock_id] = processed_df
+
+# 最後針對每支股票把有 NaN 的行刪除 (看需求是否一定要這樣)
+for stock_id, df in stock_df.items():
+    stock_df[stock_id] = df.dropna()
+
+# 簡單檢查其中一檔的 image_path
+print(stock_df['1773']['image_path'].head())
+
+# 將最終結果存到 pkl 檔中
 with open('stock_df.pkl', 'wb') as f:
     pickle.dump(stock_df, f)
